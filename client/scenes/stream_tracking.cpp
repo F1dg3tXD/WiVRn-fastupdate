@@ -275,7 +275,7 @@ void scenes::stream::tracking()
 	application::instance().setup_jni();
 
 	XrTime next_battery_check = 0;
-	const XrDuration battery_check_interval = 30'000'000'000; // 30s
+	const XrDuration battery_check_interval = 5'000'000'000; // 5s
 #endif
 
 	magic_enum::containers::array<device_id, XrSpace> spaces{};
