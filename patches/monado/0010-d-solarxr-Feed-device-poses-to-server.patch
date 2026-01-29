@@ -48,6 +48,8 @@ index 000000000..596a61008
 +#include "xrt/xrt_device.h"
 +
 +#include <math.h>
+
+#include <stdint.h>
 +
 +#define PROTOBUF_FLOAT(v_) ((uint8_t *)&(v_))[0], ((uint8_t *)&(v_))[1], ((uint8_t *)&(v_))[2], ((uint8_t *)&(v_))[3]
 +#define PROTOBUF_INT32(v_)                                                                                             \
@@ -64,6 +66,7 @@ index 000000000..596a61008
 +	uint8_t last_status;
 +	bool battery_charging;
 +	float battery_charge;
++	uint64_t battery_last_sent;
 +};
 +
 +bool
@@ -150,8 +153,9 @@ index 000000000..596a61008
 +	    .xdev = xdev,
 +	    .input_name = input_name,
 +	    .id = feeder->next_id++,
-+	    .last_status = UINT8_MAX,
-+	};
++	    .last_status = UINT8_MAX,+	    .battery_charging = false,
++	    .battery_charge = 0.0f,
++	    .battery_last_sent = 0,+	};
 +	u_hashmap_int_insert(feeder->devices, (uint64_t)(uintptr_t)xdev, device);
 +
 +	// send the announcement
@@ -228,14 +232,17 @@ index 000000000..596a61008
 +		device->next_to_erase = data->to_erase;
 +		data->to_erase = device;
 +	} else {
-+		// report meaningful changes in battery level
-+		bool present = false, charging = false;
-+		float charge = 0;
-+		if (xdev->supported.battery_status &&
-+		    xrt_device_get_battery_status(xdev, &present, &charging, &charge) == XRT_SUCCESS &&
-+		    (charging != device->battery_charging || fabsf(charge - device->battery_charge) >= 1e-05)) {
-+			device->battery_charging = charging;
-+			device->battery_charge = charge;
+		// report meaningful changes in battery level or periodic updates
+		const uint64_t battery_interval_ns = 5'000'000'000; // 5s
+		bool present = false, charging = false;
+		float charge = 0;
+		if (xdev->supported.battery_status &&
+		    xrt_device_get_battery_status(xdev, &present, &charging, &charge) == XRT_SUCCESS &&
+		    (charging != device->battery_charging || fabsf(charge - device->battery_charge) >= 1e-05 ||
+		     (data->time - device->battery_last_sent) >= battery_interval_ns)) {
+			device->battery_charging = charging;
+			device->battery_charge = charge;
+			device->battery_last_sent = data->time;
 +			uint8_t message[] = {
 +			    (5 << 3) | 2, 0,                          // ProtobufMessage::battery
 +			    (1 << 3) | 0, PROTOBUF_INT32(device->id), // Battery::tracker_id
