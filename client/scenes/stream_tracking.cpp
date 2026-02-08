@@ -448,9 +448,10 @@ void scenes::stream::tracking()
 			tracking.production_timestamp = t0;
 			tracking.timestamp = t0 + pattern[pattern_position].prediction_ns;
 			tracking.view_flags = {};
-			tracking.views = {};
 			tracking.state_flags = {};
+			tracking.views = {};
 			tracking.device_poses.clear();
+			tracking.face = {};
 
 			if (recenter_requested.exchange(false))
 				tracking.state_flags = wivrn::from_headset::tracking::recentered;
@@ -462,12 +463,13 @@ void scenes::stream::tracking()
 					const auto & item = pattern[pattern_position];
 					auto at_time = t0 + item.prediction_ns;
 
+					// Don't merge items that are too far from the current one
+					if (std::abs(tracking.timestamp - at_time) > 1'000'000)
+						break;
+
 					switch (item.device)
 					{
 						case device_id::HEAD:
-							// Don't merge items that are too far from the current one
-							if (std::abs(tracking.timestamp - at_time) > 1'000'000)
-								goto subpattern_end;
 							tracking.view_flags = session.locate_views(XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, tracking.timestamp, view_space, views);
 							assert(views.size() == tracking.views.size());
 							for (auto [i, j]: std::views::zip(views, tracking.views))
@@ -487,11 +489,20 @@ void scenes::stream::tracking()
 						case wivrn::device_id::LEFT_POKE:
 						case wivrn::device_id::RIGHT_PINCH_POSE:
 						case wivrn::device_id::RIGHT_POKE:
-						case wivrn::device_id::EYE_GAZE:
-							// Don't merge items that are too far from the current one
-							if (std::abs(tracking.timestamp - at_time) > 1'000'000)
-								goto subpattern_end;
 							locate_spaces.add_space(item.device, spaces[item.device], tracking.timestamp, tracking.device_poses);
+							break;
+						case wivrn::device_id::EYE_GAZE:
+							// Eye gaze uses view pose as the origin
+							tracking.device_poses.push_back(locate_space(item.device, spaces[item.device], spaces[wivrn::device_id::HEAD], tracking.timestamp));
+							break;
+						case wivrn::device_id::FACE:
+							std::visit(utils::overloaded{
+							                   [](std::monostate &) {},
+							                   [&](auto & ft) {
+								                   ft.get_weights(at_time, tracking.face.emplace<typename std::remove_reference_t<decltype(ft)>::packet_type>());
+							                   },
+							           },
+							           face_tracker);
 							break;
 						case wivrn::device_id::LEFT_HAND:
 							if (left_hand)
@@ -526,19 +537,10 @@ void scenes::stream::tracking()
 							           },
 							           body_tracker);
 							break;
-						case wivrn::device_id::FACE:
-							std::visit(utils::overloaded{
-							                   [](std::monostate &) {},
-							                   [&](auto & ft) {
-								                   ft.get_weights(at_time, tracking.face.emplace<typename std::remove_reference_t<decltype(ft)>::packet_type>());
-							                   },
-							           },
-							           face_tracker);
 						default:
 							break;
 					}
 				}
-			subpattern_end:
 				locate_spaces.resolve(session, tracking.timestamp, tracking.device_poses);
 			}
 			catch (const std::system_error & e)
@@ -566,7 +568,7 @@ void scenes::stream::tracking()
 			packets.resize(std::max(packets.size(), 1 + hands.size() + body.size()));
 			size_t packet_count = 0;
 
-			if (not tracking.device_poses.empty())
+			if (not(tracking.device_poses.empty() and std::holds_alternative<std::monostate>(tracking.face)))
 			{
 				auto & packet = packets[packet_count++];
 				packet.clear();
@@ -575,12 +577,9 @@ void scenes::stream::tracking()
 
 			for (const auto & i: hands)
 			{
-				if (i.joints)
-				{
-					auto & packet = packets[packet_count++];
-					packet.clear();
-					wivrn_session::stream_socket_t::serialize(packet, i);
-				}
+				auto & packet = packets[packet_count++];
+				packet.clear();
+				wivrn_session::stream_socket_t::serialize(packet, i);
 			}
 			for (const auto & i: body)
 			{
